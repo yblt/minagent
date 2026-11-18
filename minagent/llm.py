@@ -21,6 +21,22 @@ class LLMError(Exception):
 Message = Dict[str, str]
 
 
+def to_wire_messages(messages: List[Message]) -> List[Message]:
+    """出站映射：内部 role=tool 的观察转为 role=user。
+
+    OpenAI 兼容协议要求 role=tool 必须带 tool_call_id 且前面有 assistant.tool_calls；
+    本项目走 JSON-in-text 自定义协议，没有该结构，原样发送会被真实 API 拒绝（400）。
+    存储层保留 role=tool（trace 与追问回溯用），只在发送边界转换。
+    """
+    wire: List[Message] = []
+    for m in messages:
+        if m["role"] == "tool":
+            wire.append({"role": "user", "content": f"[工具结果] {m['content']}"})
+        else:
+            wire.append(dict(m))
+    return wire
+
+
 class MockLLM:
     """按脚本顺序吐出回复；脚本耗尽后返回兜底 answer。记录每次收到的 messages 供断言。"""
 
@@ -51,7 +67,9 @@ class OpenAICompatClient:
             raise LLMError("缺少 API Key：设置环境变量 MINAGENT_API_KEY，或改用 MockLLM")
 
     def chat(self, messages: List[Message]) -> str:
-        body = json.dumps({"model": self.model, "messages": messages, "temperature": 0}).encode("utf-8")
+        body = json.dumps(
+            {"model": self.model, "messages": to_wire_messages(messages), "temperature": 0}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=body,

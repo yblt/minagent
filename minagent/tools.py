@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -123,8 +124,9 @@ _CORPUS = {
 }
 
 
-def build_default_registry() -> ToolRegistry:
+def build_default_registry(docs_dir: Optional[Path] = None) -> ToolRegistry:
     reg = ToolRegistry()
+    docs_root = Path(docs_dir) if docs_dir else Path(__file__).resolve().parent.parent / "docs"
 
     @reg.tool(
         "calculator",
@@ -204,5 +206,28 @@ def build_default_registry() -> ToolRegistry:
             items[index - 1]["done"] = True
             return f"marked done: {items[index-1]['content']}"
         raise ToolError(f"unknown action '{action}'")
+
+    @reg.tool(
+        "read_docs",
+        "读取 docs 目录下的文档内容。name 留空时列出全部可用文档名",
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "文档文件名，如 guide.md；留空列出目录"}},
+            "required": [],
+        },
+    )
+    def read_docs(name: Optional[str] = None, session=None) -> str:
+        root = docs_root.resolve()
+        if not root.is_dir():
+            raise ToolError(f"docs dir not found: {root}")
+        if not name:
+            files = sorted(p.name for p in root.iterdir() if p.is_file())
+            return "docs: " + (", ".join(files) or "(empty)")
+        target = (root / name).resolve()
+        if not target.is_relative_to(root):
+            raise ToolError("path outside docs dir is not allowed")
+        if not target.is_file():
+            raise ToolError(f"no such doc '{name}'")
+        return target.read_text(encoding="utf-8", errors="replace")
 
     return reg

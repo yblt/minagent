@@ -52,9 +52,15 @@ class ContextManager:
         """history 不含 system；返回发送给 LLM 的完整 messages。"""
         msgs = history
         if len(msgs) > self.max_messages:
-            old, recent = msgs[: -self.keep_recent], msgs[-self.keep_recent :]
-            summary = self.summarizer(old)
-            msgs = [{"role": "system", "content": f"{SUMMARY_PREFIX}\n{summary}"}] + recent
+            split = len(msgs) - self.keep_recent
+            # 切点回退到最近的用户消息边界：一个 turn = user + assistant/tool 若干，
+            # 从中间切会把 action 和它的工具结果拆进摘要两侧，追问时对不上号
+            while split > 0 and msgs[split]["role"] != "user":
+                split -= 1
+            if split > 0:
+                old, recent = msgs[:split], msgs[split:]
+                summary = self.summarizer(old)
+                msgs = [{"role": "system", "content": f"{SUMMARY_PREFIX}\n{summary}"}] + recent
         return [{"role": "system", "content": system_prompt}] + msgs
 
     def needs_compression(self, history: List[Message]) -> bool:

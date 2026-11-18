@@ -108,7 +108,7 @@ def test_llm_unavailable_degrades_gracefully():
             self.n += 1
             raise LLMError("connection refused")
 
-    agent = Agent(BrokenLLM(), llm_retries=1)
+    agent = Agent(BrokenLLM(), llm_retries=1, retry_backoff=0)
     r = agent.chat("u", "w", "hi")
     assert not r.finished and "不可用" in r.text
     assert agent.llm.n == 2  # 首次 + 重试1次

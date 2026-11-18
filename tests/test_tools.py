@@ -12,7 +12,7 @@ def reg():
 
 
 def test_registry_has_all_tools(reg):
-    assert set(reg.names()) == {"calculator", "search", "weather", "todo"}
+    assert set(reg.names()) == {"calculator", "search", "weather", "todo", "read_docs"}
 
 
 def test_calculator_basic(reg):

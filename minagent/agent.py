@@ -11,12 +11,14 @@ Loop：
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .context import ContextManager
 from .llm import LLMError
+from .memory import MemoryItem, MemoryStore
 from .parser import parse_llm_output
 from .session import Session, SessionStore
 from .tools import ToolError, ToolRegistry, build_default_registry
@@ -34,6 +36,11 @@ SYSTEM_PROMPT_TMPL = """你是一个会自主决定使用工具的 Agent。只�
 2. 工具返回 error 时，根据错误信息修正参数重试，或改用其他方式回答。
 3. 回答用户追问前，先查看历史中已有的工具结果，能复用就不要重复调用。
 4. 当前会话待办快照：{todos}
+{memory}"""
+
+MEMORY_SECTION_TMPL = """
+用户长期记忆（该用户跨窗口共享的事实，与当前问题无关时忽略）：
+{items}
 """
 
 
@@ -53,23 +60,30 @@ class Agent:
         registry: Optional[ToolRegistry] = None,
         store: Optional[SessionStore] = None,
         ctx: Optional[ContextManager] = None,
+        memory: Optional[MemoryStore] = None,
         max_iterations: int = 8,
         llm_retries: int = 1,
+        retry_backoff: float = 0.5,
         trace_dir: Optional[Path] = None,
     ) -> None:
         self.llm = llm
         self.registry = registry or build_default_registry()
         self.store = store or SessionStore()
         self.ctx = ctx or ContextManager()
+        self.memory = memory if memory is not None else MemoryStore()
         self.max_iterations = max_iterations
         self.llm_retries = llm_retries
+        self.retry_backoff = retry_backoff
         self.trace_dir = Path(trace_dir) if trace_dir else None
 
     # -- helpers ---------------------------------------------------------
-    def _system_prompt(self, session: Session) -> str:
+    def _system_prompt(self, session: Session, recalled: List[MemoryItem]) -> str:
         todos = session.state.get("todos", [])
         snap = json_dumps_compact(todos) if todos else "（空）"
-        return SYSTEM_PROMPT_TMPL.format(tools=self.registry.prompt_schemas(), todos=snap)
+        mem = ""
+        if recalled:
+            mem = MEMORY_SECTION_TMPL.format(items="\n".join(f"- {it.text}" for it in recalled))
+        return SYSTEM_PROMPT_TMPL.format(tools=self.registry.prompt_schemas(), todos=snap, memory=mem)
 
     def _call_llm(self, messages, tracer: Tracer) -> str:
         last_err: Optional[Exception] = None
@@ -80,6 +94,8 @@ class Agent:
             except LLMError as e:
                 last_err = e
                 tracer.log("llm_error", attempt=attempt, error=str(e))
+                if attempt < self.llm_retries and self.retry_backoff > 0:
+                    time.sleep(self.retry_backoff * (attempt + 1))
         raise last_err  # type: ignore[misc]
 
     # -- main loop -------------------------------------------------------
@@ -87,10 +103,13 @@ class Agent:
         session = self.store.get_or_create(user_id, window_id)
         tracer = Tracer(session.session_id, self.trace_dir / f"{session.session_id.replace(':', '_')}.jsonl" if self.trace_dir else None)
         session.append("user", user_input)
+        recalled = self.memory.recall(user_id, user_input)
+        if recalled:
+            tracer.log("memory_recall", items=[it.text for it in recalled])
         steps = 0
         try:
             for steps in range(1, self.max_iterations + 1):
-                messages = self.ctx.build(self._system_prompt(session), session.messages)
+                messages = self.ctx.build(self._system_prompt(session, recalled), session.messages)
                 try:
                     raw = self._call_llm(messages, tracer)
                 except LLMError as e:
@@ -123,6 +142,10 @@ class Agent:
                     tracer.log("tool_call", step=steps, tool=parsed.tool, args=parsed.args, ok=False, error=str(e))
                 session.append("tool", self.ctx.trim_tool_result(role_content))
         finally:
+            # 写入时机：对话收尾统一抽取（无论成败，用户说出的事实都成立）
+            for fact in self.memory.extractor(user_input):
+                if self.memory.remember(user_id, fact, session.session_id):
+                    tracer.log("memory_write", text=fact)
             self.store.save(session)
         text = "已达到最大循环轮次，仍未得到最终答案。请把问题拆小一点再试。"
         tracer.log("final", text=text, reason="max_iterations")
